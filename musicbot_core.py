@@ -87,6 +87,46 @@ def _resolve_cookies_file():
 _COOKIES_FILE = _resolve_cookies_file()
 _PROXY_URL = os.environ.get("YTDLP_PROXY")
 
+
+def _resolve_ffmpeg_executable():
+    """
+    หา path ของโปรแกรม ffmpeg ที่จะใช้เล่นเสียง เรียงตามลำดับความสำคัญ:
+    1. Environment Variable FFMPEG_PATH — ถ้าตั้งไว้ให้ใช้ path นั้นตรงๆ (เผื่อกรณีติดตั้งไว้ตำแหน่งพิเศษ)
+    2. ffmpeg ที่มีอยู่ใน PATH ของระบบอยู่แล้ว (หาโดย shutil.which)
+    3. ffmpeg แบบ static binary จากไลบรารี imageio-ffmpeg (ติดตั้งผ่าน pip)
+       วิธีนี้ช่วยแก้ปัญหา "ffmpeg was not found" ได้เกือบทุกกรณี เพราะไม่ต้องพึ่ง PATH ของระบบเลย
+       ไม่ว่าจะรันบน Windows (ที่บางทีติดตั้ง ffmpeg ไม่สำเร็จ/ไม่รีเฟรช PATH) หรือ Railway
+    ถ้าหาไม่เจอเลยจริงๆ จะ fallback กลับไปใช้คำว่า 'ffmpeg' เฉยๆ เหมือนเดิม (ให้ error เดิมโผล่มา
+    เพื่อให้รู้ว่าต้องตั้งค่าเพิ่ม)
+    """
+    import shutil
+
+    env_path = os.environ.get("FFMPEG_PATH")
+    if env_path and os.path.exists(env_path):
+        print(f"[FFmpeg] ✅ ใช้ ffmpeg จาก Environment Variable FFMPEG_PATH: {env_path}")
+        return env_path
+
+    which_path = shutil.which("ffmpeg")
+    if which_path:
+        print(f"[FFmpeg] ✅ พบ ffmpeg ใน PATH ของระบบ: {which_path}")
+        return which_path
+
+    try:
+        import imageio_ffmpeg
+        bundled_path = imageio_ffmpeg.get_ffmpeg_exe()
+        if bundled_path and os.path.exists(bundled_path):
+            print(f"[FFmpeg] ✅ ไม่พบ ffmpeg ใน PATH ระบบ ใช้ ffmpeg สำรองที่มากับไลบรารี imageio-ffmpeg แทน: {bundled_path}")
+            return bundled_path
+    except Exception as e:
+        print(f"[FFmpeg] ⚠️ โหลด ffmpeg สำรองจาก imageio-ffmpeg ไม่สำเร็จ: {e}")
+
+    print("[FFmpeg] ❌ ไม่พบ ffmpeg เลยทั้งใน PATH และไลบรารีสำรอง! "
+          "การเล่นเพลงจะล้มเหลวด้วย error 'ffmpeg was not found' — ดูวิธีแก้ใน README หัวข้อ ffmpeg")
+    return "ffmpeg"
+
+
+FFMPEG_EXECUTABLE = _resolve_ffmpeg_executable()
+
 ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -190,6 +230,13 @@ def friendly_error_message(title, error):
             f"❌ YouTube บล็อกเซิร์ฟเวอร์ไม่ให้ดึงเพลง **{title}** (คิดว่าเป็นบอท)\n"
             f"👉 แอดมินต้องตั้งค่า cookies ให้บอทก่อน ดูวิธีทำได้ในหัวข้อ "
             f"**\"แก้ปัญหา YouTube บล็อกว่าเป็นบอท\"** ใน README ของโปรเจกต์"
+        )
+    if "ffmpeg was not found" in err_text or "ffmpeg" in err_text.lower() and "not found" in err_text.lower():
+        return (
+            f"❌ เล่นเพลง **{title}** ไม่ได้ เพราะหาโปรแกรม ffmpeg ไม่เจอในเครื่อง/เซิร์ฟเวอร์นี้\n"
+            f"👉 แอดมินต้องติดตั้ง ffmpeg หรือรัน `pip install -r requirement_lib.txt` ใหม่อีกครั้ง "
+            f"(มี `imageio-ffmpeg` เป็นตัวสำรองอยู่แล้ว) ดูรายละเอียดในหัวข้อ "
+            f"**\"แก้ปัญหา ffmpeg was not found\"** ใน README ของโปรเจกต์"
         )
     return f"❌ เกิดข้อผิดพลาดในการดึงเสียงของเพลง **{title}**: {err_text}"
 
@@ -484,7 +531,7 @@ class MusicCog(commands.Cog):
             song['webpage_url'] = data.get('webpage_url') or song.get('webpage_url')
 
             print("[Audio] ✅ โหลดสำเร็จ! เริ่มจำลองเสียงไปที่ Discord")
-            audio_source = discord.FFmpegPCMAudio(stream_url, **ffmpeg_options)
+            audio_source = discord.FFmpegPCMAudio(stream_url, executable=FFMPEG_EXECUTABLE, **ffmpeg_options)
             ctx.voice_client.play(discord.PCMVolumeTransformer(audio_source, volume=0.5), after=lambda e: self.play_next(ctx))
 
             print(f"[Play] ▶️ กำลังเล่น: {song['title']}")
