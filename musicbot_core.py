@@ -11,6 +11,40 @@ import json
 # ส่วนที่ 1: การตั้งค่า yt-dlp / ffmpeg
 # ==============================================================================
 
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_cookies_file():
+    """
+    หาไฟล์ cookies.txt สำหรับให้ yt-dlp ใช้ยืนยันตัวตนกับ YouTube
+    (จำเป็นมากเมื่อรันบนโฮสต์คลาวด์อย่าง Railway ที่มักโดน YouTube บล็อกว่าเป็นบอท)
+
+    รองรับ 2 วิธี:
+    1. ตั้ง Environment Variable ชื่อ YTDLP_COOKIES ให้เป็นเนื้อหาไฟล์ cookies.txt ทั้งหมด (แนะนำสำหรับ Railway)
+    2. วางไฟล์ cookies.txt ไว้ในโฟลเดอร์เดียวกับโปรเจกต์ (ใช้ได้ทั้งรันเครื่องตัวเองและ Railway ถ้าอัปโหลดไฟล์ไปด้วย)
+    """
+    cookies_env = os.environ.get("YTDLP_COOKIES")
+    if cookies_env:
+        cookie_path = os.path.join(_BASE_DIR, "cookies.txt")
+        try:
+            with open(cookie_path, "w", encoding="utf-8") as f:
+                f.write(cookies_env)
+            print("[Cookies] ✅ โหลด cookies จาก Environment Variable YTDLP_COOKIES แล้ว")
+            return cookie_path
+        except Exception as e:
+            print(f"[Cookies] ⚠️ เขียนไฟล์ cookies จาก YTDLP_COOKIES ไม่สำเร็จ: {e}")
+
+    local_cookie_path = os.path.join(_BASE_DIR, "cookies.txt")
+    if os.path.exists(local_cookie_path):
+        print("[Cookies] ✅ พบไฟล์ cookies.txt ในโปรเจกต์ ใช้ยืนยันตัวตนกับ YouTube")
+        return local_cookie_path
+
+    print("[Cookies] ℹ️ ไม่พบ cookies.txt — ถ้าเจอ error 'Sign in to confirm you're not a bot' ให้ตั้งค่า cookies ตามคำแนะนำใน README")
+    return None
+
+
+_COOKIES_FILE = _resolve_cookies_file()
+
 ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -30,8 +64,6 @@ ffmpeg_options = {
     'options': '-vn -b:a 192k -bufsize 10M'
 }
 
-ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
-
 # ใช้สำหรับค้นหา/เช็คเพลย์ลิสต์แบบเร็ว (extract_flat) ไม่ต้องรอโหลดสตรีมจริง
 ytdl_flat_options = {
     'extract_flat': True,
@@ -41,6 +73,12 @@ ytdl_flat_options = {
     'default_search': 'auto',
     'source_address': '0.0.0.0',
 }
+
+if _COOKIES_FILE:
+    ytdl_format_options['cookiefile'] = _COOKIES_FILE
+    ytdl_flat_options['cookiefile'] = _COOKIES_FILE
+
+ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 ytdl_flat = youtube_dl.YoutubeDL(ytdl_flat_options)
 
 # ==============================================================================
@@ -91,6 +129,18 @@ def get_queue(guild_id):
     if guild_id not in music_queues:
         music_queues[guild_id] = []
     return music_queues[guild_id]
+
+
+def friendly_error_message(title, error):
+    """แปล error ของ yt-dlp ให้อ่านง่ายขึ้น โดยเฉพาะเคส YouTube บล็อกว่าเป็นบอท"""
+    err_text = str(error)
+    if "Sign in to confirm" in err_text or "not a bot" in err_text:
+        return (
+            f"❌ YouTube บล็อกเซิร์ฟเวอร์ไม่ให้ดึงเพลง **{title}** (คิดว่าเป็นบอท)\n"
+            f"👉 แอดมินต้องตั้งค่า cookies ให้บอทก่อน ดูวิธีทำได้ในหัวข้อ "
+            f"**\"แก้ปัญหา YouTube บล็อกว่าเป็นบอท\"** ใน README ของโปรเจกต์"
+        )
+    return f"❌ เกิดข้อผิดพลาดในการดึงเสียงของเพลง **{title}**: {err_text}"
 
 
 def format_duration(seconds):
@@ -290,7 +340,7 @@ class MusicCog(commands.Cog):
                 await ctx.send(f'🎶 กำลังเล่น: **{song["title"]}**')
         except Exception as e:
             print(f"[Error] ❌ โหลดเสียงล้มเหลว: {e}")
-            await ctx.send(f"❌ เกิดข้อผิดพลาดในการดึงเสียงของเพลง **{song['title']}**: {str(e)}")
+            await ctx.send(friendly_error_message(song['title'], e))
             self.play_next(ctx)
 
     def start_disconnect_timer(self, ctx, guild_id):
