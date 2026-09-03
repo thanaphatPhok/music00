@@ -6,6 +6,7 @@ import asyncio
 import threading
 import os
 import json
+import random
 
 # ==============================================================================
 # ส่วนที่ 1: การตั้งค่า yt-dlp / ffmpeg
@@ -236,6 +237,78 @@ def get_audio_info(query):
     return entries
 
 
+# คลังคำค้นหาแนวเพลงต่างๆ ใช้สำหรับปุ่ม "สุ่มเพลง" เพื่อให้ได้เพลงหลากหลายแนว
+RANDOM_SEARCH_POOL = [
+    "เพลงฮิตล่าสุด", "เพลงสตริงฮิต", "เพลงเพราะฟังสบายๆ", "เพลงลูกทุ่งฮิต",
+    "เพลงร็อคไทยฮิต", "เพลงฟังก่อนนอน", "เพลงวันแม่", "เพลงอกหักฟังเศร้า",
+    "K-pop hits", "top global hits", "EDM hits playlist", "chill lofi hits",
+    "hip hop hits", "pop hits", "acoustic cover hits", "throwback hits 2010s",
+    "anime opening songs", "indie pop hits", "reggae hits", "jazz hits",
+    "disco hits", "rnb hits", "japanese city pop hits", "80s hits",
+]
+
+
+def get_random_songs(count):
+    """
+    สุ่มเพลงจาก YouTube จำนวน `count` เพลง โดยสุ่มคำค้นจาก RANDOM_SEARCH_POOL
+    แล้วสุ่มเลือกเพลงจากผลการค้นหาแต่ละคำ (แคชผลลัพธ์ต่อคำค้นไว้กันยิงซ้ำ)
+    """
+    terms = RANDOM_SEARCH_POOL.copy()
+    random.shuffle(terms)
+    term_cache = {}
+
+    def fetch_entries(term):
+        if term in term_cache:
+            return term_cache[term]
+        entries = []
+        try:
+            data = ytdl_flat.extract_info(f"ytsearch20:{term}", download=False)
+            entries = [e for e in (data.get('entries') or []) if e]
+        except Exception as e:
+            print(f"[Random] ⚠️ ค้นหาคำว่า '{term}' ไม่สำเร็จ: {e}")
+        term_cache[term] = entries
+        return entries
+
+    picked = []
+    seen_urls = set()
+    idx = 0
+    guard = 0
+    max_guard = max(count * 6, 30)
+
+    while len(picked) < count and guard < max_guard and terms:
+        guard += 1
+        term = terms[idx % len(terms)]
+        idx += 1
+        entries = fetch_entries(term)
+        if not entries:
+            continue
+
+        entry = random.choice(entries)
+        url = entry.get('url') or entry.get('webpage_url')
+        if not url and entry.get('id'):
+            url = f"https://www.youtube.com/watch?v={entry.get('id')}"
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+
+        thumb = entry.get('thumbnail')
+        if not thumb and entry.get('thumbnails'):
+            try:
+                thumb = entry['thumbnails'][-1]['url']
+            except Exception:
+                thumb = None
+
+        picked.append({
+            'url': url,
+            'title': entry.get('title', 'Unknown Title'),
+            'thumbnail': thumb,
+            'duration': entry.get('duration'),
+            'webpage_url': entry.get('webpage_url') or url,
+        })
+
+    return picked
+
+
 # ==============================================================================
 # ส่วนที่ 3: ปุ่มควบคุมเพลง (Persistent View) สำหรับแผงควบคุมในห้องขอเพลง
 # ==============================================================================
@@ -283,6 +356,36 @@ class PlayerControls(discord.ui.View):
         await interaction.response.send_message("⏹️ หยุดเพลงและออกจากห้องเสียงแล้ว", ephemeral=True)
         if cog:
             await cog.update_panel(guild)
+
+    @discord.ui.button(label="สุ่มเพลง", emoji="🔀", style=discord.ButtonStyle.green, custom_id="veloxmusic:random")
+    async def random_songs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if not guild:
+            return
+
+        if not interaction.user.voice:
+            return await interaction.response.send_message(
+                "❌ คุณต้องอยู่ในห้องเสียงก่อนถึงจะสุ่มเพลงได้นะ!", ephemeral=True
+            )
+
+        channel = interaction.user.voice.channel
+        permissions = channel.permissions_for(guild.me)
+        if not permissions.connect or not permissions.speak:
+            return await interaction.response.send_message(
+                "❌ บอทไม่มีสิทธิ์ Connect/Speak ในห้องเสียงนี้", ephemeral=True
+            )
+
+        cog = interaction.client.get_cog("MusicCog")
+        if not cog:
+            return await interaction.response.send_message("❌ เกิดข้อผิดพลาดภายในบอท", ephemeral=True)
+
+        count = random.randint(1, 20)
+        await interaction.response.send_message(
+            f"🔀 กำลังสุ่มเพลง {count} เพลง เข้าคิว รอสักครู่นะ...", ephemeral=True
+        )
+
+        ctx = await interaction.client.get_context(interaction)
+        await cog.handle_random_request(ctx, count)
 
 
 async def build_now_playing_embed(guild):
@@ -423,7 +526,7 @@ class MusicCog(commands.Cog):
         print(f'✅ บอทออนไลน์แล้ว! ชื่อ: {self.bot.user}')
         print(f'🆔 ID: {self.bot.user.id}')
         print('=================================')
-        print('พร้อมรับคำสั่ง !play, !stop, !skip, !queue, /setup')
+        print('พร้อมรับคำสั่ง !play, !stop, !skip, !queue, !random, /setup')
 
         if not getattr(self.bot, "_views_registered", False):
             self.bot.add_view(self.player_view)
@@ -549,6 +652,57 @@ class MusicCog(commands.Cog):
             if from_auto_channel:
                 await self._auto_delete(msg)
 
+    # ---------------- ตรรกะสุ่มเพลง ใช้โดยปุ่ม "สุ่มเพลง" ---------------- #
+
+    async def handle_random_request(self, ctx, count):
+        if not ctx.author.voice:
+            return await ctx.send("❌ คุณต้องอยู่ในห้องเสียงก่อนถึงจะสุ่มเพลงได้นะ!")
+
+        channel = ctx.author.voice.channel
+        permissions = channel.permissions_for(ctx.me)
+        if not permissions.connect or not permissions.speak:
+            print(f"[Permission] ❌ บอทไม่มีสิทธิ์เข้าห้อง {channel.name}")
+            return await ctx.send("❌ บอทไม่มีสิทธิ์ Connect/Speak ในห้องเสียงนี้")
+
+        if not ctx.voice_client:
+            print(f"[Connect] 🔌 กำลังเข้าห้องเสียง: {channel.name}")
+            await channel.connect()
+        elif ctx.voice_client.channel != channel:
+            print(f"[Connect] 🔀 ย้ายไปห้องเสียง: {channel.name}")
+            await ctx.voice_client.move_to(channel)
+
+        try:
+            print(f"[Random] 🔀 กำลังสุ่มเพลง {count} เพลง สำหรับห้อง {ctx.guild.id}")
+            loop = asyncio.get_event_loop()
+            songs = await loop.run_in_executor(None, get_random_songs, count)
+
+            if not songs:
+                print("[Random] ❌ สุ่มเพลงไม่สำเร็จ ไม่พบผลลัพธ์")
+                await ctx.send("❌ สุ่มเพลงไม่สำเร็จ ลองกดปุ่มใหม่อีกครั้งนะ")
+                return
+
+            requester = ctx.author.display_name
+            for s in songs:
+                s['requester'] = requester
+                s['_from_auto_channel'] = False
+
+            queue_list = get_queue(ctx.guild.id)
+            queue_list.extend(songs)
+            print(f"[Random] 📥 เพิ่มเพลงสุ่ม {len(songs)} เพลงเข้าคิว (รวมเป็น {len(queue_list)} เพลง) โดย {requester}")
+
+            is_active = ctx.voice_client.is_playing() or ctx.voice_client.is_paused() or current_song.get(ctx.guild.id) is not None
+
+            if not is_active:
+                print("[Random] ▶️ คิวว่างเปล่า ส่งเพลงสุ่มเข้าเครื่องเล่นทันที")
+                self.play_next(ctx)
+
+            await ctx.send(f"🔀 สุ่มเพลงเรียบร้อย! เพิ่ม **{len(songs)}** เพลงแบบสุ่มลงในคิวแล้ว 🎶 (ขอโดย {requester})")
+            await self.update_panel(ctx.guild)
+
+        except Exception as e:
+            print(f"[Error] ❌ เกิดข้อผิดพลาดตอนสุ่มเพลง: {e}")
+            await ctx.send(f"❌ เกิดข้อผิดพลาดในการสุ่มเพลง: {str(e)}")
+
     async def _auto_delete(self, message, delay=5):
         """ลบข้อความแจ้งเตือนอัตโนมัติหลังผ่านไปสักพัก เพื่อให้ห้องขอเพลงดูสะอาดตา"""
         if message is None:
@@ -593,6 +747,13 @@ class MusicCog(commands.Cog):
         print(f"[Command] 📜 ผู้ใช้ขอดู Queue ในห้อง {ctx.guild.id}")
         embed = await build_now_playing_embed(ctx.guild)
         await ctx.send(embed=embed)
+
+    @commands.command(name='random', help='สุ่มเพลง 1-20 เพลงต่อคิวเข้าไปให้อัตโนมัติ')
+    async def random_cmd(self, ctx):
+        print(f"[Command] 🔀 ผู้ใช้สั่ง Random ในห้อง {ctx.guild.id}")
+        count = random.randint(1, 20)
+        await ctx.send(f"🔀 กำลังสุ่มเพลง {count} เพลง เข้าคิว รอสักครู่นะ...")
+        await self.handle_random_request(ctx, count)
 
     # ---------------- คำสั่ง Slash: /setup ---------------- #
 
