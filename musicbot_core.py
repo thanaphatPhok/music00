@@ -14,36 +14,77 @@ import json
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _validate_cookie_file(path):
+    """เช็คคร่าวๆ ว่าไฟล์ cookies หน้าตาถูกต้องตามฟอร์แมต Netscape ไหม (ป้องกัน tab เพี้ยนตอน copy-paste)"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        if "# Netscape HTTP Cookie File" not in content and "# HTTP Cookie File" not in content:
+            print("[Cookies] ⚠️ ไฟล์ cookies ไม่มีบรรทัดหัวไฟล์ตามมาตรฐาน Netscape "
+                  "อาจไม่ใช่ไฟล์ cookies.txt ที่ถูกต้อง")
+        # แถวข้อมูลจริงของ Netscape cookie ต้องคั่นด้วย TAB (\t) ไม่ใช่ space
+        data_lines = [ln for ln in content.splitlines() if ln and not ln.startswith("#")]
+        if data_lines and not any("\t" in ln for ln in data_lines):
+            print("[Cookies] ⚠️ ไม่พบตัวคั่น TAB ในไฟล์ cookies — ไฟล์อาจเพี้ยนจากการ copy-paste "
+                  "(tab ถูกแปลงเป็น space) แนะนำให้ใช้วิธีตั้งค่าแบบ Base64 (YTDLP_COOKIES_B64) แทน")
+            return False
+        return True
+    except Exception as e:
+        print(f"[Cookies] ⚠️ ตรวจสอบไฟล์ cookies ไม่สำเร็จ: {e}")
+        return False
+
+
 def _resolve_cookies_file():
     """
     หาไฟล์ cookies.txt สำหรับให้ yt-dlp ใช้ยืนยันตัวตนกับ YouTube
     (จำเป็นมากเมื่อรันบนโฮสต์คลาวด์อย่าง Railway ที่มักโดน YouTube บล็อกว่าเป็นบอท)
 
-    รองรับ 2 วิธี:
-    1. ตั้ง Environment Variable ชื่อ YTDLP_COOKIES ให้เป็นเนื้อหาไฟล์ cookies.txt ทั้งหมด (แนะนำสำหรับ Railway)
-    2. วางไฟล์ cookies.txt ไว้ในโฟลเดอร์เดียวกับโปรเจกต์ (ใช้ได้ทั้งรันเครื่องตัวเองและ Railway ถ้าอัปโหลดไฟล์ไปด้วย)
+    รองรับ 3 วิธี เรียงตามลำดับความสำคัญ:
+    1. YTDLP_COOKIES_B64 — เนื้อหาไฟล์ cookies.txt เข้ารหัส Base64 (แนะนำที่สุดสำหรับ Railway
+       เพราะกันปัญหา tab ถูกแปลงเป็น space ตอน copy-paste ลงกล่อง Variables)
+    2. YTDLP_COOKIES — เนื้อหาไฟล์ cookies.txt แบบข้อความตรงๆ
+    3. ไฟล์ cookies.txt ที่วางไว้ในโฟลเดอร์โปรเจกต์เอง
     """
+    cookie_path = os.path.join(_BASE_DIR, "cookies.txt")
+
+    cookies_b64 = os.environ.get("YTDLP_COOKIES_B64")
+    if cookies_b64:
+        try:
+            import base64
+            raw = base64.b64decode(cookies_b64.strip()).decode("utf-8")
+            with open(cookie_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(raw)
+            if _validate_cookie_file(cookie_path):
+                print("[Cookies] ✅ โหลด cookies จาก YTDLP_COOKIES_B64 แล้ว (ผ่านการตรวจสอบฟอร์แมต)")
+            return cookie_path
+        except Exception as e:
+            print(f"[Cookies] ⚠️ ถอดรหัส Base64 จาก YTDLP_COOKIES_B64 ไม่สำเร็จ: {e}")
+
     cookies_env = os.environ.get("YTDLP_COOKIES")
     if cookies_env:
-        cookie_path = os.path.join(_BASE_DIR, "cookies.txt")
         try:
-            with open(cookie_path, "w", encoding="utf-8") as f:
+            with open(cookie_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(cookies_env)
-            print("[Cookies] ✅ โหลด cookies จาก Environment Variable YTDLP_COOKIES แล้ว")
+            if _validate_cookie_file(cookie_path):
+                print("[Cookies] ✅ โหลด cookies จาก Environment Variable YTDLP_COOKIES แล้ว")
+            else:
+                print("[Cookies] ⚠️ cookies จาก YTDLP_COOKIES ดูเหมือนจะเพี้ยน "
+                      "ลองเปลี่ยนไปใช้ YTDLP_COOKIES_B64 แทน (ดูวิธีใน README)")
             return cookie_path
         except Exception as e:
             print(f"[Cookies] ⚠️ เขียนไฟล์ cookies จาก YTDLP_COOKIES ไม่สำเร็จ: {e}")
 
-    local_cookie_path = os.path.join(_BASE_DIR, "cookies.txt")
-    if os.path.exists(local_cookie_path):
-        print("[Cookies] ✅ พบไฟล์ cookies.txt ในโปรเจกต์ ใช้ยืนยันตัวตนกับ YouTube")
-        return local_cookie_path
+    if os.path.exists(cookie_path):
+        if _validate_cookie_file(cookie_path):
+            print("[Cookies] ✅ พบไฟล์ cookies.txt ในโปรเจกต์ ใช้ยืนยันตัวตนกับ YouTube")
+        return cookie_path
 
     print("[Cookies] ℹ️ ไม่พบ cookies.txt — ถ้าเจอ error 'Sign in to confirm you're not a bot' ให้ตั้งค่า cookies ตามคำแนะนำใน README")
     return None
 
 
 _COOKIES_FILE = _resolve_cookies_file()
+_PROXY_URL = os.environ.get("YTDLP_PROXY")
 
 ytdl_format_options = {
     'format': 'bestaudio/best',
@@ -77,6 +118,15 @@ ytdl_flat_options = {
 if _COOKIES_FILE:
     ytdl_format_options['cookiefile'] = _COOKIES_FILE
     ytdl_flat_options['cookiefile'] = _COOKIES_FILE
+
+if _PROXY_URL:
+    ytdl_format_options['proxy'] = _PROXY_URL
+    ytdl_flat_options['proxy'] = _PROXY_URL
+    print("[Proxy] 🌐 ใช้ Proxy ที่ตั้งค่าไว้ใน YTDLP_PROXY สำหรับดึงข้อมูลจาก YouTube")
+
+# บังคับให้ yt-dlp แสร้งเป็น client ประเภท "android" ซึ่งมักถูกบล็อกน้อยกว่า client เว็บปกติ
+ytdl_format_options.setdefault('extractor_args', {}).setdefault('youtube', {})['player_client'] = ['android', 'web']
+ytdl_flat_options.setdefault('extractor_args', {}).setdefault('youtube', {})['player_client'] = ['android', 'web']
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 ytdl_flat = youtube_dl.YoutubeDL(ytdl_flat_options)
